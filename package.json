@@ -1,6 +1,6 @@
 {
   "name": "@jimmygu/sfa-sdk-test",
-  "version": "1.0.0",
+  "version": "1.0.17",
   "description": "TypeScript SDK for StableFlow AI API - Cross-chain token swap solution",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

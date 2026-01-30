@@ -10,14 +10,21 @@ import { formatQuoteError } from '../utils/error';
 import { tokens } from '../wallets/config/tokens';
 import EVMWallet from '../wallets/evm';
 import { OpenAPI } from '../core/OpenAPI';
+import Big from 'big.js';
 
 const SPENDER = "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7";
 const DESTINATION_TOKEN = usdcChains["arb"];
+const MIN_AMOUNT = Big(5).times(10 ** DESTINATION_TOKEN.decimals).toFixed(0);
 
 class HyperliquidService {
   public async quote(params: HyperliquidQuoteParams): Promise<{ quote: any; error: string | null; }> {
 
-    const result = { quote: null, error: null };
+    const result: { quote: any; error: string | null; } = { quote: null, error: null };
+
+    if (Big(params.amountWei || 0).lt(MIN_AMOUNT)) {
+      result.error = `Amount is too low, at least ${MIN_AMOUNT}`;
+      return result;
+    }
 
     const quoteParams = {
       ...params,
@@ -30,6 +37,7 @@ class HyperliquidService {
       refundType: "ORIGIN_CHAIN",
       appFees: params.oneclickParams?.appFees,
       swapType: "EXACT_OUTPUT",
+      isProxy: false,
     };
 
     try {
@@ -54,16 +62,15 @@ class HyperliquidService {
       sendParam: quote?.sendParam,
       fromToken: quote?.quoteParam.fromToken,
       depositAddress: quote?.quote?.depositAddress,
-      amountWei: quote?.quoteParam?.amountWei,
+      amountWei: quote?.quote?.amountIn,
     };
 
     const txhash = await ServiceMap[Service.OneClick].send(sendParams);
-    console.log("txhash: %o", txhash);
 
     return txhash;
   }
 
-  public async deposit(params: HyperliquidDepositParams) {
+  public async deposit(params: HyperliquidDepositParams): Promise<HyperliquidDepositResponse> {
     const {
       evmWallet,
       evmWalletAddress,
@@ -74,19 +81,22 @@ class HyperliquidService {
     const permitParams = await this.generatePermit({
       address: evmWalletAddress,
       evmWallet,
-      amountWei: quote?.quoteParam?.amountWei,
+      amountWei: quote?.quote?.amountOut,
     });
 
-    console.log("permitParams: %o", permitParams);
-
     const depositParams = {
-      sender: quote?.quoteParam?.recipient,
-      from_addr: quote?.quoteParam?.refundTo,
       deposit_address: quote?.quote?.depositAddress,
-      from_token: quote?.quoteParam?.fromToken?.contractAddress,
-      to_token: quote?.quoteParam?.toToken?.contractAddress,
+      from_addr: quote?.quoteParam?.refundTo,
+      from_amount: quote?.quote?.amountIn,
+      from_chain: quote?.quoteParam?.fromToken?.blockchain,
       from_hash: txhash,
+      from_token: quote?.quoteParam?.fromToken?.contractAddress,
+      sender: quote?.quoteParam?.recipient,
+      to_amount: quote?.quote?.amountOut,
+      to_chain: quote?.quoteParam?.toToken?.blockchain,
+      to_token: quote?.quoteParam?.toToken?.contractAddress,
       type: Service.OneClick,
+
       permit: permitParams,
     };
 
@@ -94,7 +104,7 @@ class HyperliquidService {
 
     const depositRes = await __request(OpenAPI, {
       method: "POST",
-      url: "/v0/deposit/submit",
+      url: "/v0/deposit",
       body: depositParams,
       mediaType: "application/json",
       errors: {
@@ -103,11 +113,23 @@ class HyperliquidService {
       },
     });
 
-    console.log("depositRes: %o", depositRes);
-
+    return depositRes as HyperliquidDepositResponse;
   }
 
-  public async getStatus(params: HyperliquidGetStatusParams) {}
+  public async getStatus(params: HyperliquidGetStatusParams): Promise<HyperliquidDepositStatusResponse> {
+    return __request(OpenAPI, {
+      method: "GET",
+      url: "/v0/deposit/status",
+      query: {
+        depositId: params.depositId,
+      },
+      mediaType: "application/json",
+      errors: {
+        400: `Bad Request - Invalid input data`,
+        401: `Unauthorized - JWT token is invalid`,
+      },
+    });
+  }
 
   protected async generatePermit(params: HyperliquidGeneratePermitParams) {
     const {
@@ -132,7 +154,7 @@ class HyperliquidService {
     );
 
     const deadline = Math.floor(Date.now() / 1000) + 86400;
-    const nonce = (await erc20.nonces(address)).toString();
+    const nonce = await erc20.nonces(address);
     const value = amountWei;
 
     const domain = {
@@ -156,7 +178,7 @@ class HyperliquidService {
       owner: address,
       spender: SPENDER,
       value,
-      nonce,
+      nonce: nonce.toString(),
       deadline
     };
 
@@ -169,14 +191,15 @@ class HyperliquidService {
     const { v, r, s } = ethers.Signature.from(signature);
 
     const permitParams = {
-      deadline: deadline.toString(),
+      amount: value,
+      deadline,
       owner: address,
       r,
       s,
       spender: SPENDER,
       token: tokenAddress,
       v,
-      value,
+      nonce: Number(nonce),
     };
 
     console.log("permitParams: %o", permitParams);
@@ -189,6 +212,7 @@ export const Hyperliquid = new HyperliquidService();
 
 export const HyperliquidFromTokens = tokens.filter((token) => !(token.chainName === "Arbitrum" && token.symbol === "USDC"));
 export const HyperliuquidToToken = DESTINATION_TOKEN;
+export const HyperliuquidMinAmount = MIN_AMOUNT;
 
 export interface HyperliquidQuoteParams {
   slippageTolerance: number;
@@ -228,5 +252,23 @@ export interface HyperliquidDepositParams extends HyperliquidTransferParams {
 }
 
 export interface HyperliquidGetStatusParams {
-
+  depositId: string;
 }
+
+export interface HyperliquidResponse<T> {
+  code: number;
+  data: T;
+}
+
+export interface HyperliquidDepositResponseData {
+  depositId: number;
+}
+
+export type HyperliquidDepositResponse = HyperliquidResponse<HyperliquidDepositResponseData>;
+
+export interface HyperliquidDepositStatusResponseData {
+  status: string;
+  txHash: string;
+}
+
+export type HyperliquidDepositStatusResponse = HyperliquidResponse<HyperliquidDepositStatusResponseData>;
